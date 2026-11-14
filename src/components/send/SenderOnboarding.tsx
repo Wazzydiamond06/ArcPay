@@ -8,7 +8,7 @@ import { useAccount, useAccountEffect } from 'wagmi'
 import { Button } from '@/components/ui/button'
 import { Input, Label } from '@/components/ui/input'
 import { ProgressHeader, SlideStage, SlideStep, StepSkeleton } from '@/components/onboarding/Frame'
-import { checkSender, registerSender } from '@/lib/api'
+import { checkSender, registerSender, ApiError } from '@/lib/api'
 import type { SenderProfile } from '@/lib/sender'
 
 const TOTAL_STEPS = 3
@@ -41,7 +41,6 @@ export function SenderOnboarding({ onComplete }: { onComplete: (profile: SenderP
     },
   })
 
-  // The gateway: as soon as a wallet is connected, look it up in the database.
   const lookup = useQuery({
     queryKey: ['sender', address?.toLowerCase()],
     queryFn: () => checkSender(address as string),
@@ -50,10 +49,10 @@ export function SenderOnboarding({ onComplete }: { onComplete: (profile: SenderP
     staleTime: 0,
     refetchOnWindowFocus: false,
   })
+  
   const returning = lookup.data?.exists === true && Boolean(lookup.data.displayName)
-
-  // A wallet that is already registered skips the name step entirely and goes to the dashboard.
   const routedFor = useRef<string | null>(null)
+
   useEffect(() => {
     if (!returning || !address || !lookup.data?.displayName || routedFor.current === address) return
     routedFor.current = address
@@ -61,7 +60,6 @@ export function SenderOnboarding({ onComplete }: { onComplete: (profile: SenderP
     onComplete({ displayName: lookup.data.displayName, address })
   }, [returning, address, lookup.data?.displayName, onComplete])
 
-  // Real states: the wallet prompt, the database lookup, or a signed-in sender being routed.
   const walletPending = status === 'connecting' || status === 'reconnecting'
   const loadingLabel = walletPending
     ? 'Connecting your wallet'
@@ -70,22 +68,32 @@ export function SenderOnboarding({ onComplete }: { onComplete: (profile: SenderP
         ? 'Signing you in'
         : 'Checking your account'
       : pause
-  const stepIndex = !isConnected ? 0 : profileStep === 0 ? 1 : 2
 
+  const stepIndex = !isConnected ? 0 : profileStep === 0 ? 1 : 2
   const nameValid = nameOk(displayName)
   const truncated = address ? `${address.slice(0, 6)}…${address.slice(-4)}` : ''
 
-  // New sender: save the name against the wallet in the database, then show the ready screen.
-  const toReady = (e: React.FormEvent) => {
+  const toReady = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!nameValid || pause || !address) return
+    
     setDirection(1)
     setPause('Saving your profile')
-    const minimumWait = new Promise((resolve) => setTimeout(resolve, SKELETON_MS))
-    Promise.all([registerSender(address, displayName.trim()), minimumWait])
-      .then(() => setProfileStep(1))
-      .catch(() => toast.error('We could not save your profile. Please try again.'))
-      .finally(() => setPause(null))
+    
+    try {
+      const minimumWait = new Promise((resolve) => setTimeout(resolve, SKELETON_MS))
+      await Promise.all([registerSender(address, displayName.trim()), minimumWait])
+      setProfileStep(1)
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'wallet_exists') {
+        toast.success(`Welcome back!`)
+        onComplete({ displayName: displayName.trim(), address })
+      } else {
+        toast.error('We could not save your profile. Please try again.')
+      }
+    } finally {
+      setPause(null)
+    }
   }
 
   const back = () => {
@@ -127,7 +135,6 @@ export function SenderOnboarding({ onComplete }: { onComplete: (profile: SenderP
               </ul>
 
               <div className="relative mt-10">
-                {/* glow */}
                 <motion.span
                   aria-hidden="true"
                   className="absolute inset-x-6 -bottom-1 top-3 rounded-full bg-gold-gradient blur-2xl"
@@ -175,11 +182,6 @@ export function SenderOnboarding({ onComplete }: { onComplete: (profile: SenderP
                   className="h-16 rounded-3xl text-xl"
                 />
                 <p className="mt-2 text-sm text-bronze/60">This name appears on your digital receipt.</p>
-                {lookup.isError && (
-                  <p className="mt-2 text-sm font-medium text-red-600">
-                    We could not check your account just now. You can still continue.
-                  </p>
-                )}
               </div>
               <Button type="submit" size="xl" className="mt-6" disabled={!nameValid}>
                 Continue
