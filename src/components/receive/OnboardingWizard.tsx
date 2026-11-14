@@ -7,11 +7,18 @@ import { Button } from '@/components/ui/button'
 import { Input, Label } from '@/components/ui/input'
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp'
 import { ProgressHeader, SlideStage, SlideStep, StepSkeleton } from '@/components/onboarding/Frame'
-import { ApiError, describeApiError, loginWithOtp, registerAccount, verifyPhone, type PhoneStatus } from '@/lib/api'
 import { formatPhone, formatPhoneInput, isValidNgNumber, maskPhone, nationalDigits } from '@/lib/arcpay'
 import type { ReceiverProfile } from '@/lib/receiver'
+import { createClient } from '@supabase/supabase-js'
 
-/** Steps: 0 phone, 1 OTP, then (new users only) 2 legal name, 3 BVN, 4 review. Returning users stop after OTP. */
+// 1. Initialize Supabase directly inside the component
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabase = createClient(supabaseUrl, supabaseAnonKey)
+
+type PhoneStatus = 'new' | 'returning'
+const describeApiError = (error: any) => error?.message || 'Something went wrong. Please try again.'
+
 const NEW_USER_STEPS = 5
 const RETURNING_STEPS = 2
 
@@ -49,12 +56,11 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
   const phoneValid = isValidNgNumber(national)
   const namesValid = nameOk(firstName) && nameOk(lastName)
   const bvnValid = /^\d{11}$/.test(bvn)
-  // `verified` only locks the OTP step itself (it is cleared before moving on).
+  
   const busy = loading !== null || (step === 1 && verified)
   const returning = status === 'returning'
   const total = returning ? RETURNING_STEPS : NEW_USER_STEPS
 
-  /** Show a skeleton while a real request runs (and for at least SKELETON_MS so it never flashes). */
   const runWithSkeleton = <T,>(kind: LoadingKind, task: () => Promise<T>, onDone: (result: T) => void, onFail: (error: unknown) => void) => {
     clearTimeout(timer.current)
     setDirection(1)
@@ -72,13 +78,21 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
     setStep(next)
   }
 
-  // Step 0 -> 1: the gateway check decides which path this phone number takes.
+  // 2. Direct Supabase Call: Check if phone exists
   const sendCode = (e: React.FormEvent) => {
     e.preventDefault()
     if (!phoneValid || busy) return
     runWithSkeleton(
       { label: 'Checking your number', variant: 'otp' },
-      () => verifyPhone(national),
+      async () => {
+        const { data, error } = await supabase
+          .from('users')
+          .select('phone_number')
+          .eq('phone_number', national)
+          .single()
+        if (error || !data) return 'new' as PhoneStatus
+        return 'returning' as PhoneStatus
+      },
       (result) => {
         setStatus(result)
         setOtp('')
@@ -89,19 +103,26 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
     )
   }
 
-  // Mock verification: any 4 digits succeed.
+  // 3. Direct Supabase Call: Fetch returning user data
   const handleOtpComplete = (code: string) => {
     setVerified(true)
     timer.current = setTimeout(() => {
       if (!returning) {
-        // The code is accepted: clear the OTP lock, otherwise `busy` blocks every later step.
         setVerified(false)
         go(2)
         return
       }
       runWithSkeleton(
         { label: 'Signing you in', variant: 'card' },
-        () => loginWithOtp(national, code),
+        async () => {
+          const { data, error } = await supabase
+            .from('users')
+            .select('*')
+            .eq('phone_number', national)
+            .single()
+          if (error || !data) throw new Error('Account not found')
+          return { firstName: data.first_name, lastName: data.last_name }
+        },
         (account) => {
           toast.success(`Welcome back, ${account.firstName}`)
           onComplete({ national, firstName: account.firstName, lastName: account.lastName })
@@ -121,18 +142,28 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
     go(3)
   }
 
-  // New users: create the account (wallet + saved profile) once the BVN is verified.
+  // 4. Direct Supabase Call: Register new user
   const submitBvn = (e: React.FormEvent) => {
     e.preventDefault()
     if (!bvnValid || busy) return
     runWithSkeleton(
       { label: 'Verifying your BVN', variant: 'input' },
-      () => registerAccount({ national, firstName: firstName.trim(), lastName: lastName.trim(), bvn }),
+      async () => {
+        const { data, error } = await supabase
+          .from('users')
+          .insert([
+            { phone_number: national, first_name: firstName.trim(), last_name: lastName.trim(), bvn_hash: bvn }
+          ])
+        if (error) {
+          if (error.code === '23505') throw new Error('phone_exists')
+          throw new Error(error.message)
+        }
+        return true
+      },
       () => setStep(4),
-      (error) => {
+      (error: any) => {
         toast.error(describeApiError(error))
-        if (error instanceof ApiError && error.code === 'phone_exists') {
-          // Someone created this account meanwhile: restart as a login.
+        if (error?.message === 'phone_exists') {
           setStatus(null)
           setBvn('')
           setStep(0)
@@ -165,9 +196,7 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
               <h1 className={heading}>Enter your phone number to access your funds.</h1>
               <p className="mt-3 text-pretty text-lg text-bronze/70">We will text you a code to confirm it is you.</p>
               <div className="mt-8 text-left">
-                <Label htmlFor="phone" className="sr-only">
-                  Phone number
-                </Label>
+                <Label htmlFor="phone" className="sr-only">Phone number</Label>
                 <Input
                   id="phone"
                   type="tel"
@@ -180,16 +209,10 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
                   className="h-[4.5rem] rounded-3xl text-center text-3xl font-bold tabular-nums"
                 />
                 <p className="mt-3 h-5 text-center text-sm font-medium text-bronze/60">
-                  {phoneInput === ''
-                    ? 'Start with +234 or 0'
-                    : phoneValid
-                      ? `We will text ${formatPhone(national)}`
-                      : 'Keep typing your 10-digit mobile number'}
+                  {phoneInput === '' ? 'Start with +234 or 0' : phoneValid ? `We will text ${formatPhone(national)}` : 'Keep typing your 10-digit mobile number'}
                 </p>
               </div>
-              <Button type="submit" size="xl" className="mt-6" disabled={!phoneValid}>
-                Send Code
-              </Button>
+              <Button type="submit" size="xl" className="mt-6" disabled={!phoneValid}>Send Code</Button>
             </form>
           </SlideStep>
         ) : step === 1 ? (
@@ -198,12 +221,7 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
               <h1 className={heading}>{returning ? 'Log in to ArcPay' : 'Create your ArcPay Account'}</h1>
               <p className="mt-3 text-pretty text-lg text-bronze/70">Enter the 4-digit code sent to your phone.</p>
               <p className="mt-1 font-semibold tabular-nums text-bronze/80">{maskPhone(national)}</p>
-              <div
-                data-verified={verified}
-                className="group mt-8 flex flex-col items-center"
-                role="group"
-                aria-label="Verification code"
-              >
+              <div data-verified={verified} className="group mt-8 flex flex-col items-center" role="group" aria-label="Verification code">
                 <InputOTP
                   maxLength={4}
                   pattern={REGEXP_ONLY_DIGITS}
@@ -217,33 +235,18 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
                 >
                   <InputOTPGroup>
                     {[0, 1, 2, 3].map((i) => (
-                      <InputOTPSlot
-                        key={i}
-                        index={i}
-                        className="group-data-[verified=true]:border-emerald-500/60 group-data-[verified=true]:bg-emerald-50"
-                      />
+                      <InputOTPSlot key={i} index={i} className="group-data-[verified=true]:border-emerald-500/60 group-data-[verified=true]:bg-emerald-50" />
                     ))}
                   </InputOTPGroup>
                 </InputOTP>
 
                 <div className="mt-6 h-12" aria-live="polite">
                   {verified ? (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="inline-flex items-center gap-2 rounded-full bg-emerald-100 px-5 py-2.5 font-bold text-emerald-800"
-                    >
+                    <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="inline-flex items-center gap-2 rounded-full bg-emerald-100 px-5 py-2.5 font-bold text-emerald-800">
                       <Check className="h-5 w-5" strokeWidth={3} /> Code accepted
                     </motion.div>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOtp('')
-                        toast('A new code is on its way')
-                      }}
-                      className="h-12 rounded-full px-5 font-semibold text-ember underline-offset-4 hover:underline"
-                    >
+                    <button type="button" onClick={() => { setOtp(''); toast('A new code is on its way') }} className="h-12 rounded-full px-5 font-semibold text-ember underline-offset-4 hover:underline">
                       Resend code
                     </button>
                   )}
@@ -256,67 +259,34 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
           <SlideStep key="name" direction={direction}>
             <form onSubmit={submitName} className="text-center">
               <h1 className={heading}>What is your legal name?</h1>
-              <p className="mt-3 text-pretty text-base text-bronze/70">
-                Ensure this exactly matches your local bank account for seamless Naira withdrawals.
-              </p>
+              <p className="mt-3 text-pretty text-base text-bronze/70">Ensure this exactly matches your local bank account for seamless Naira withdrawals.</p>
               <div className="mt-8 space-y-4 text-left">
                 <div>
                   <Label htmlFor="first">First name</Label>
-                  <Input
-                    id="first"
-                    autoComplete="given-name"
-                    autoFocus
-                    placeholder="Adaeze"
-                    value={firstName}
-                    onChange={(e) => setFirstName(cleanName(e.target.value))}
-                    className="h-16 rounded-3xl text-xl"
-                  />
+                  <Input id="first" autoComplete="given-name" autoFocus placeholder="Adaeze" value={firstName} onChange={(e) => setFirstName(cleanName(e.target.value))} className="h-16 rounded-3xl text-xl" />
                 </div>
                 <div>
                   <Label htmlFor="last">Last name</Label>
-                  <Input
-                    id="last"
-                    autoComplete="family-name"
-                    placeholder="Okafor"
-                    value={lastName}
-                    onChange={(e) => setLastName(cleanName(e.target.value))}
-                    className="h-16 rounded-3xl text-xl"
-                  />
+                  <Input id="last" autoComplete="family-name" placeholder="Okafor" value={lastName} onChange={(e) => setLastName(cleanName(e.target.value))} className="h-16 rounded-3xl text-xl" />
                 </div>
               </div>
-              <Button type="submit" size="xl" className="mt-8" disabled={!namesValid}>
-                Continue
-              </Button>
+              <Button type="submit" size="xl" className="mt-8" disabled={!namesValid}>Continue</Button>
             </form>
           </SlideStep>
         ) : step === 3 ? (
           <SlideStep key="bvn" direction={direction}>
             <form onSubmit={submitBvn} className="text-center">
               <h1 className={heading}>Verify your BVN.</h1>
-              <p className="mt-3 text-pretty text-base text-bronze/70">
-                Your 11-digit Bank Verification Number confirms your identity for Naira withdrawals.
-              </p>
+              <p className="mt-3 text-pretty text-base text-bronze/70">Your 11-digit Bank Verification Number confirms your identity for Naira withdrawals.</p>
               <div className="mt-8 text-left">
                 <Label htmlFor="bvn">BVN</Label>
-                <Input
-                  id="bvn"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  autoFocus
-                  maxLength={11}
-                  placeholder="11 digits"
-                  value={bvn}
-                  onChange={(e) => setBvn(e.target.value.replace(/\D/g, '').slice(0, 11))}
-                  className="h-[4.5rem] rounded-3xl text-center text-3xl font-bold tabular-nums tracking-[0.12em]"
-                />
+                <Input id="bvn" inputMode="numeric" autoComplete="off" autoFocus maxLength={11} placeholder="11 digits" value={bvn} onChange={(e) => setBvn(e.target.value.replace(/\D/g, '').slice(0, 11))} className="h-[4.5rem] rounded-3xl text-center text-3xl font-bold tabular-nums tracking-[0.12em]" />
                 <p className="mt-3 flex items-start gap-2 text-sm text-bronze/65">
                   <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
                   We store only a secure hash, never the number itself. Dial *565*0# from your registered phone to get your BVN.
                 </p>
               </div>
-              <Button type="submit" size="xl" className="mt-6" disabled={!bvnValid}>
-                Verify BVN
-              </Button>
+              <Button type="submit" size="xl" className="mt-6" disabled={!bvnValid}>Verify BVN</Button>
               <p className="mt-3 text-xs text-bronze/50">Demo mode: the BVN is format-checked, not verified with a bank.</p>
             </form>
           </SlideStep>
@@ -331,18 +301,14 @@ export function OnboardingWizard({ onComplete }: { onComplete: (profile: Receive
               <dl className="mt-8 space-y-3 rounded-3xl border border-white/80 bg-white/80 p-6 text-left shadow-card">
                 <div className="flex items-baseline justify-between gap-4">
                   <dt className="text-xs font-semibold uppercase tracking-[0.1em] text-bronze/55">Name</dt>
-                  <dd className="text-lg font-bold">
-                    {firstName.trim()} {lastName.trim()}
-                  </dd>
+                  <dd className="text-lg font-bold">{firstName.trim()} {lastName.trim()}</dd>
                 </div>
                 <div className="flex items-baseline justify-between gap-4">
                   <dt className="text-xs font-semibold uppercase tracking-[0.1em] text-bronze/55">Phone</dt>
                   <dd className="text-lg font-bold tabular-nums">{formatPhone(national)}</dd>
                 </div>
               </dl>
-              <Button size="xl" className="mt-8" onClick={finish}>
-                Complete Setup
-              </Button>
+              <Button size="xl" className="mt-8" onClick={finish}>Complete Setup</Button>
             </div>
           </SlideStep>
         )}
