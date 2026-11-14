@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: #fdf5eb;
+  color: #63401a;
+  font-family: 'Geist', 'Inter', ui-sans-serif, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: #fbbf24;
+  color: #2e1b08;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .text-pretty {
+    text-wrap: pretty;
+  }
+  .bg-gold-gradient {
+    background-image: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+  }
+  .text-gold-gradient {
+    background-image: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .mesh-bg {
+    background-color: #fdf5eb;
+    background-image:
+      radial-gradient(60% 50% at 15% 10%, rgba(251, 191, 36, 0.55) 0%, transparent 70%),
+      radial-gradient(55% 45% at 90% 20%, rgba(217, 119, 6, 0.35) 0%, transparent 70%),
+      radial-gradient(60% 50% at 60% 100%, rgba(251, 191, 36, 0.4) 0%, transparent 70%);
+  }
+}
+
+/* Dashed network lines: dash pattern is 4 + 18 = 22 units, so offsetting by
+   multiples of 22 loops seamlessly. */
+@keyframes flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -220;
+  }
+}
+
+@keyframes flow-reverse {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 220;
+  }
+}
+
+.flow-line {
+  animation: flow 6s linear infinite;
+}
+.flow-fast {
+  animation-duration: 4s;
+}
+.flow-slow {
+  animation-duration: 9s;
+}
+.flow-rev {
+  animation-name: flow-reverse;
+  animation-duration: 7s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-drift,
+  .animate-drift-slow,
+  .flow-line {
+    animation: none;
+  }
+}
+
+/* Radix overlays (sheet, dialog, menu): enter/exit animations. Radix waits for the exit animation before unmounting. */
+@keyframes overlay-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes overlay-out { from { opacity: 1 } to { opacity: 0 } }
+@keyframes sheet-in-right { from { transform: translateX(100%) } to { transform: translateX(0) } }
+@keyframes sheet-out-right { from { transform: translateX(0) } to { transform: translateX(100%) } }
+@keyframes sheet-in-left { from { transform: translateX(-100%) } to { transform: translateX(0) } }
+@keyframes sheet-out-left { from { transform: translateX(0) } to { transform: translateX(-100%) } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(-6px) scale(0.96) } to { opacity: 1; transform: none } }
+@keyframes pop-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateY(-4px) scale(0.97) } }
+@keyframes dialog-in { from { opacity: 0; transform: translate(-50%, -48%) scale(0.96) } to { opacity: 1; transform: translate(-50%, -50%) scale(1) } }
+@keyframes dialog-out { from { opacity: 1; transform: translate(-50%, -50%) scale(1) } to { opacity: 0; transform: translate(-50%, -48%) scale(0.97) } }
+
+.overlay-fade[data-state='open'] { animation: overlay-in 200ms ease-out }
+.overlay-fade[data-state='closed'] { animation: overlay-out 180ms ease-in }
+.sheet-slide[data-side='right'][data-state='open'] { animation: sheet-in-right 320ms cubic-bezier(0.32, 0.72, 0, 1) }
+.sheet-slide[data-side='right'][data-state='closed'] { animation: sheet-out-right 220ms ease-in }
+.sheet-slide[data-side='left'][data-state='open'] { animation: sheet-in-left 320ms cubic-bezier(0.32, 0.72, 0, 1) }
+.sheet-slide[data-side='left'][data-state='closed'] { animation: sheet-out-left 220ms ease-in }
+.menu-pop[data-state='open'] { animation: pop-in 140ms ease-out; transform-origin: var(--radix-dropdown-menu-content-transform-origin) }
+.menu-pop[data-state='closed'] { animation: pop-out 100ms ease-in }
+.dialog-pop[data-state='open'] { animation: dialog-in 200ms ease-out }
+.dialog-pop[data-state='closed'] { animation: dialog-out 150ms ease-in }
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-fade, .sheet-slide, .menu-pop, .dialog-pop { animation: none !important }
+}
